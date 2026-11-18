@@ -1,0 +1,10 @@
+opencv-python
+numpy
+pyautogui
+keyboard
+pystray
+pillow
+pywin32
+psutil
+mss
+customtkinter

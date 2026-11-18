@@ -1,0 +1,24 @@
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Настройки и сгенерированные файлы
+settings.json
+default_template.png
+custom_template.png
+auto_template.png
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
