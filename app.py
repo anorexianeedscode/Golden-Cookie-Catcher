@@ -33,7 +33,7 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
 APP_NAME = "Golden Cookie Catcher"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 MUTEX_NAME = "GoldenCookieCatcher_SingleInstance"
 
 SCALE = 0.5
@@ -88,12 +88,32 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 CRASH_FILE = os.path.join(BASE_DIR, "crash.log")
 
 
-def _bundled_template():
+def _imread_unicode(path):
+    """cv2.imread, устойчивый к кириллице в пути."""
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        return cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+    except Exception:
+        return None
+
+
+def _imwrite_unicode(path, img):
+    """cv2.imwrite, устойчивый к кириллице в пути."""
+    try:
+        ok, buf = cv2.imencode(".png", img)
+        if ok:
+            buf.tofile(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _template_candidates():
+    """Все места, где может лежать шаблон: бандл, папка exe, корень."""
     for base in (RES_DIR, BASE_DIR):
-        p = os.path.join(base, "assets", TPL_FILE)
-        if os.path.exists(p):
-            return p
-    return None
+        yield os.path.join(base, "assets", TPL_FILE)
+        yield os.path.join(base, TPL_FILE)
 
 
 LANG = {
@@ -156,6 +176,7 @@ LANG = {
         "zone_set": "Dead zone:",
         "key_set": "Hotkey:",
         "only_one": "Golden Cookie Catcher is already running.",
+        "tpl_bad": "Template unreadable:",
     },
     "ru": {
         "title": APP_NAME,
@@ -216,6 +237,7 @@ LANG = {
         "zone_set": "Мёртвая зона:",
         "key_set": "Клавиша:",
         "only_one": "Golden Cookie Catcher уже запущен.",
+        "tpl_bad": "Шаблон не читается:",
     },
 }
 
@@ -391,15 +413,25 @@ class GoldenCatcherApp:
             cv2.circle(img, (32, 32), 26, (0, 160, 215), 2)
             for cx, cy, r in ((22, 22, 5), (44, 26, 4), (26, 45, 5), (43, 44, 3)):
                 cv2.circle(img, (cx, cy), r, (35, 55, 140), -1)
-            cv2.imwrite(path, img)
+            _imwrite_unicode(path, img)
         return path
 
     def load_template(self):
-        path = _bundled_template() or self._fallback_template()
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        for path in _template_candidates():
+            if not os.path.exists(path):
+                continue
+            img = _imread_unicode(path)
+            if img is not None and img.size > 0:
+                self.template_img = img
+                self.log(f"{self.tr('tpl_loaded')} {os.path.basename(path)}")
+                return
+            self.log(f"{self.tr('tpl_bad')} {path}")
+
+        fallback = self._fallback_template()
+        img = _imread_unicode(fallback) if fallback else None
         if img is not None and img.size > 0:
             self.template_img = img
-            self.log(f"{self.tr('tpl_loaded')} {os.path.basename(path)}")
+            self.log(f"{self.tr('tpl_loaded')} {os.path.basename(fallback)}")
         else:
             self.template_img = None
             self.log(self.tr("no_template"))
