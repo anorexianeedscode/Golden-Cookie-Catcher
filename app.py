@@ -34,11 +34,11 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
 APP_NAME = "Golden Cookie Catcher"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.0"
 MUTEX_NAME = "GoldenCookieCatcher_SingleInstance"
 
 SCALE = 0.5
-SCALES = (0.55, 0.7, 0.85, 1.0, 1.15, 1.3)
+SCALES = (0.7, 0.85, 1.0, 1.15)
 NMS_RATIO = 0.5
 TPL_FILE = "golden_cookie.png"
 
@@ -100,11 +100,8 @@ def _bundled_template():
 
 def _make_chime(path):
     """Генерирует короткий мягкий сигнал: две ноты с плавной огибающей."""
-    try:
-        if os.path.getsize(path) > 1024:
-            return path
-    except OSError:
-        pass
+    if os.path.exists(path):
+        return path
     rate = 44100
 
     def tone(freq, dur, amp):
@@ -160,8 +157,7 @@ LANG = {
         "auto_frame": "Big cookie",
         "auto_en": "Click the big cookie",
         "ac_hotkey": "Autoclick hotkey",
-        "ac_hint": "The cursor stays on the big cookie only while autoclick is on, and leaves the game for a moment after each catch. With autoclick off the cursor is never touched.",
-        "fg_only": "Click only when the game is focused",
+        "ac_hint": "The cursor stays on the big cookie only while autoclick is on. Toggle it with the hotkey or the checkbox.",
         "grab_pt": "Pick point (3 s)",
         "offset": "Offset",
         "cps": "Clicks per second",
@@ -196,7 +192,6 @@ LANG = {
         "key_set": "Hotkey:",
         "ac_on": "Autoclick on.",
         "ac_off": "Autoclick off.",
-        "busy_key": "already taken",
         "only_one": "Golden Cookie Catcher is already running.",
     },
     "ru": {
@@ -227,8 +222,7 @@ LANG = {
         "auto_frame": "Большая печенька",
         "auto_en": "Кликать большую печеньку",
         "ac_hotkey": "Клавиша автокликера",
-        "ac_hint": "Курсор держится на большой печеньке только пока автокликер включён, и уходит из игры на пару секунд после каждой поимки. При выключенном автокликере курсор не трогается вообще.",
-        "fg_only": "Кликать только в активном окне",
+        "ac_hint": "Курсор держится на большой печеньке только пока автокликер включён. Переключается клавишей или галочкой.",
         "grab_pt": "Взять точку (3 с)",
         "offset": "Смещение",
         "cps": "Кликов в секунду",
@@ -263,7 +257,6 @@ LANG = {
         "key_set": "Клавиша:",
         "ac_on": "Автокликер включён.",
         "ac_off": "Автокликер выключен.",
-        "busy_key": "уже занята",
         "only_one": "Golden Cookie Catcher уже запущен.",
     },
 }
@@ -282,7 +275,6 @@ DEFAULTS = {
     "autoclick_enabled": True,
     "autoclick_cps": 20.0,
     "double_click": True,
-    "fg_only": True,
     "offset_x": 0,
     "offset_y": 0,
     "return_delay": 0.1,
@@ -383,6 +375,7 @@ class GoldenCatcherApp:
         self._hotkey_handle = None
         self._ac_hotkey_handle = None
         self._capture_hook = None
+        self._capture_target = None
         self.tray_icon = None
         self.template_img = None
         self.cfg = {}
@@ -422,7 +415,6 @@ class GoldenCatcherApp:
                 "autoclick_enabled": bool(self.var_autoclick.get()),
                 "autoclick_cps": float(self.ent_cps.get()),
                 "double_click": bool(self.var_dbl.get()),
-                "fg_only": bool(self.var_fg.get()),
                 "offset_x": int(self.ent_offx.get() or 0),
                 "offset_y": int(self.ent_offy.get() or 0),
                 "return_delay": float(self.ent_retdelay.get()),
@@ -510,7 +502,12 @@ class GoldenCatcherApp:
         self.running = False
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=2)
-        self._detach_hotkeys()
+        for handle in (self._hotkey_handle, self._ac_hotkey_handle):
+            if handle is not None:
+                try:
+                    keyboard.remove_hotkey(handle)
+                except Exception:
+                    pass
         if self._capture_hook is not None:
             try:
                 keyboard.unhook(self._capture_hook)
@@ -578,7 +575,7 @@ class GoldenCatcherApp:
         s = self.settings
         geo = self.root.geometry()
         if geo.startswith("1x1"):
-            geo = "640x760"
+            geo = "640x740"
         for widget in self.root.winfo_children():
             widget.destroy()
 
@@ -738,12 +735,6 @@ class GoldenCatcherApp:
                         text_color=C_TEXT, fg_color=C_ACCENT, hover_color=C_ACCENT,
                         checkmark_color="#1a1a1a").pack(anchor="w", padx=14, pady=(0, 6))
         self._hint(ac_card, self.tr("ac_hint"))
-
-        self.var_fg = ctk.BooleanVar(value=s["fg_only"])
-        ctk.CTkCheckBox(ac_card, text=self.tr("fg_only"), variable=self.var_fg,
-                        font=("Segoe UI", 12), text_color=C_TEXT,
-                        fg_color=C_ACCENT, hover_color=C_ACCENT,
-                        checkmark_color="#1a1a1a").pack(anchor="w", padx=14, pady=(0, 8))
 
         hk = ctk.CTkFrame(ac_card, fg_color="transparent")
         hk.pack(fill="x", padx=14, pady=(0, 10))
@@ -1050,24 +1041,14 @@ class GoldenCatcherApp:
 
     # ---------- hotkey ----------
 
-    def _detach_hotkeys(self):
-        for attr in ("_hotkey_handle", "_ac_hotkey_handle"):
-            handle = getattr(self, attr)
-            if handle is not None:
-                try:
-                    keyboard.remove_hotkey(handle)
-                except Exception:
-                    pass
-                setattr(self, attr, None)
-
     def capture_hotkey(self, target="main"):
-        self._detach_hotkeys()
         if self._capture_hook is not None:
             try:
                 keyboard.unhook(self._capture_hook)
             except Exception:
                 pass
             self._capture_hook = None
+        self._capture_target = target
         self.log(self.tr("capture_hint"))
 
         def on_key(event):
@@ -1096,9 +1077,6 @@ class GoldenCatcherApp:
         name = self.ent_hotkey.get().strip().lower()
         if not name:
             return
-        if name == self.ent_achotkey.get().strip().lower():
-            messagebox.showerror(self.tr("err"), f"{name}: {self.tr('busy_key')}")
-            return
         if self._hotkey_handle is not None:
             try:
                 keyboard.remove_hotkey(self._hotkey_handle)
@@ -1109,14 +1087,11 @@ class GoldenCatcherApp:
             self._hotkey_handle = keyboard.add_hotkey(name, lambda: self.root.after(0, self.toggle))
             self.settings["hotkey"] = name
         except Exception as e:
-            messagebox.showerror(self.tr("err"), f"{name}\n{e}")
+            self.log(f"Hotkey error: {e}")
 
     def apply_ac_hotkey(self):
         name = self.ent_achotkey.get().strip().lower()
         if not name:
-            return
-        if name == self.ent_hotkey.get().strip().lower():
-            messagebox.showerror(self.tr("err"), f"{name}: {self.tr('busy_key')}")
             return
         if self._ac_hotkey_handle is not None:
             try:
@@ -1129,7 +1104,7 @@ class GoldenCatcherApp:
                 name, lambda: self.root.after(0, self.toggle_autoclick))
             self.settings["ac_hotkey"] = name
         except Exception as e:
-            messagebox.showerror(self.tr("err"), f"{name}\n{e}")
+            self.log(f"Hotkey error: {e}")
 
     def toggle_autoclick(self):
         new = not self.ac_active
@@ -1153,7 +1128,6 @@ class GoldenCatcherApp:
             "interval": max(0.02, float(self.ent_scanint.get())),
             "cps": min(60.0, max(1.0, float(self.ent_cps.get() or 20))),
             "double": bool(self.var_dbl.get()),
-            "fg_only": bool(self.var_fg.get()),
             "return_delay": max(0.0, float(self.ent_retdelay.get())),
             "settle": max(0.0, float(self.ent_settle.get())),
             "max_clicks": max(1, int(self.ent_maxclicks.get() or 3)),
@@ -1242,9 +1216,8 @@ class GoldenCatcherApp:
             return False
         return abs(match[0] - sx) < radius and abs(match[1] - sy) < radius
 
-    def _press(self, x, y, dbl, move=True):
-        if move:
-            pyautogui.moveTo(x, y)
+    def _press(self, x, y, dbl):
+        pyautogui.moveTo(x, y)
         pyautogui.click()
         if dbl:
             time.sleep(0.02)
@@ -1256,7 +1229,7 @@ class GoldenCatcherApp:
         try:
             pyautogui.moveTo(sx, sy)
             time.sleep(self.cfg["settle"])
-            self._press(sx, sy, self.cfg["double"], move=False)
+            self._press(sx, sy, self.cfg["double"])
         except Exception:
             pass
         return sx, sy
@@ -1292,19 +1265,12 @@ class GoldenCatcherApp:
                 continue
 
             now = time.time()
-            focused = True
-            if cfg["fg_only"]:
-                try:
-                    focused = win32gui.GetForegroundWindow() == win.hwnd
-                except Exception:
-                    focused = True
-
             matches = self.find_matches(frame, template, cfg["threshold"], ignore)
             fresh = [m for m in matches if not self._suppressed(m, now)]
             clicked = False
             sleep_for = cfg["interval"]
 
-            if fresh and focused and now - last_click > cfg["click_cd"]:
+            if fresh and now - last_click > cfg["click_cd"]:
                 target = fresh[0]
 
                 if cfg["react"] == "full" and target[2] > self._last_w + 1:
@@ -1335,7 +1301,7 @@ class GoldenCatcherApp:
             else:
                 self._last_w = 0
 
-            if self.ac_active and focused and cfg["ac_x"] > 0 and cfg["ac_y"] > 0:
+            if self.ac_active and cfg["ac_x"] > 0 and cfg["ac_y"] > 0:
                 px = cfg["ac_x"] + cfg["off_x"]
                 py = cfg["ac_y"] + cfg["off_y"]
                 if clicked:
@@ -1361,15 +1327,9 @@ def _single_instance():
 def _run():
     handle, first = _single_instance()
     if not first:
-        lang = "ru"
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                lang = json.load(f).get("language", "ru")
-        except Exception:
-            pass
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo(APP_NAME, LANG.get(lang, LANG["ru"])["only_one"])
+        messagebox.showinfo(APP_NAME, LANG["ru"]["only_one"])
         root.destroy()
         return
 
