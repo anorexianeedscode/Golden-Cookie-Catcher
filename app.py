@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import time
+import wave
 import threading
 
 import tkinter as tk
@@ -33,11 +34,11 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
 APP_NAME = "Golden Cookie Catcher"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.5.1"
 MUTEX_NAME = "GoldenCookieCatcher_SingleInstance"
 
 SCALE = 0.5
-SCALES = (0.7, 0.85, 1.0, 1.15)
+SCALES = (0.55, 0.7, 0.85, 1.0, 1.15, 1.3)
 NMS_RATIO = 0.5
 TPL_FILE = "golden_cookie.png"
 
@@ -86,34 +87,48 @@ BASE_DIR = _writable_dir()
 RES_DIR = getattr(sys, "_MEIPASS", BASE_DIR)
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 CRASH_FILE = os.path.join(BASE_DIR, "crash.log")
+CHIME_FILE = os.path.join(BASE_DIR, "chime.wav")
 
 
-def _imread_unicode(path):
-    """cv2.imread, устойчивый к кириллице в пути."""
+def _bundled_template():
+    for base in (RES_DIR, BASE_DIR):
+        p = os.path.join(base, "assets", TPL_FILE)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _make_chime(path):
+    """Генерирует короткий мягкий сигнал: две ноты с плавной огибающей."""
     try:
-        buf = np.fromfile(path, dtype=np.uint8)
-        return cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+        if os.path.getsize(path) > 1024:
+            return path
+    except OSError:
+        pass
+    rate = 44100
+
+    def tone(freq, dur, amp):
+        n = max(1, int(rate * dur))
+        t = np.arange(n) / rate
+        env = np.sin(np.pi * np.arange(n) / n) ** 2
+        body = np.sin(2 * np.pi * freq * t) * 0.75 + np.sin(4 * np.pi * freq * t) * 0.25
+        return body * env * amp
+
+    data = np.concatenate([
+        tone(880.0, 0.11, 0.30),
+        np.zeros(int(rate * 0.02)),
+        tone(1318.5, 0.22, 0.26),
+    ])
+    pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
+    try:
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm.tobytes())
+        return path
     except Exception:
         return None
-
-
-def _imwrite_unicode(path, img):
-    """cv2.imwrite, устойчивый к кириллице в пути."""
-    try:
-        ok, buf = cv2.imencode(".png", img)
-        if ok:
-            buf.tofile(path)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def _template_candidates():
-    """Все места, где может лежать шаблон: бандл, папка exe, корень."""
-    for base in (RES_DIR, BASE_DIR):
-        yield os.path.join(base, "assets", TPL_FILE)
-        yield os.path.join(base, TPL_FILE)
 
 
 LANG = {
@@ -143,9 +158,14 @@ LANG = {
         "scan_int": "Scan interval, s",
         "beep_en": "Beep on catch",
         "auto_frame": "Big cookie",
-        "auto_en": "Keep clicking the big cookie",
+        "auto_en": "Click the big cookie",
+        "ac_hotkey": "Autoclick hotkey",
+        "ac_hint": "The cursor stays on the big cookie only while autoclick is on, and leaves the game for a moment after each catch. With autoclick off the cursor is never touched.",
+        "fg_only": "Click only when the game is focused",
         "grab_pt": "Pick point (3 s)",
-        "interval": "Interval, s",
+        "offset": "Offset",
+        "cps": "Clicks per second",
+        "dbl": "Double clicks",
         "ret_delay": "Return delay, s",
         "settle": "Cursor settle, s",
         "max_clicks": "Max attempts",
@@ -164,19 +184,20 @@ LANG = {
         "zone_title": "Mark the area to ignore",
         "started": "Running.",
         "stopped": "Stopped.",
-        "no_template": "Template not loaded.",
+        "no_template": "Sprite not loaded.",
         "no_point": "Point not picked — the cursor will not return.",
         "give_up": "No response, muting for 8 s.",
         "bad_value": "Bad value:",
         "capture_hint": "Press any key...",
         "found_n": "Matches:",
         "loop_crash": "Loop crashed:",
-        "tpl_loaded": "Template loaded:",
         "point_set": "Point:",
         "zone_set": "Dead zone:",
         "key_set": "Hotkey:",
+        "ac_on": "Autoclick on.",
+        "ac_off": "Autoclick off.",
+        "busy_key": "already taken",
         "only_one": "Golden Cookie Catcher is already running.",
-        "tpl_bad": "Template unreadable:",
     },
     "ru": {
         "title": APP_NAME,
@@ -204,9 +225,14 @@ LANG = {
         "scan_int": "Частота сканирования, с",
         "beep_en": "Сигнал при поимке",
         "auto_frame": "Большая печенька",
-        "auto_en": "Продолжать кликать большую печеньку",
+        "auto_en": "Кликать большую печеньку",
+        "ac_hotkey": "Клавиша автокликера",
+        "ac_hint": "Курсор держится на большой печеньке только пока автокликер включён, и уходит из игры на пару секунд после каждой поимки. При выключенном автокликере курсор не трогается вообще.",
+        "fg_only": "Кликать только в активном окне",
         "grab_pt": "Взять точку (3 с)",
-        "interval": "Интервал, с",
+        "offset": "Смещение",
+        "cps": "Кликов в секунду",
+        "dbl": "Двойные клики",
         "ret_delay": "Задержка возврата, с",
         "settle": "Пауза курсора, с",
         "max_clicks": "Предел попыток",
@@ -225,19 +251,20 @@ LANG = {
         "zone_title": "Отметь область, которую игнорировать",
         "started": "Работаю.",
         "stopped": "Остановлено.",
-        "no_template": "Шаблон не загружен.",
+        "no_template": "Спрайт не загружен.",
         "no_point": "Точка не взята — курсор не будет возвращаться.",
         "give_up": "Не поддаётся, глушу на 8 с.",
         "bad_value": "Некорректное значение:",
         "capture_hint": "Нажми любую клавишу...",
         "found_n": "Совпадений:",
         "loop_crash": "Цикл упал:",
-        "tpl_loaded": "Шаблон загружен:",
         "point_set": "Точка:",
         "zone_set": "Мёртвая зона:",
         "key_set": "Клавиша:",
+        "ac_on": "Автокликер включён.",
+        "ac_off": "Автокликер выключен.",
+        "busy_key": "уже занята",
         "only_one": "Golden Cookie Catcher уже запущен.",
-        "tpl_bad": "Шаблон не читается:",
     },
 }
 
@@ -246,13 +273,18 @@ DEFAULTS = {
     "version": "steam",
     "react": "full",
     "hotkey": "f8",
+    "ac_hotkey": "f9",
     "match_threshold": 0.72,
     "click_cooldown": 0.5,
     "beep_cooldown": 1.0,
     "beep_enabled": True,
     "scan_interval": 0.08,
     "autoclick_enabled": True,
-    "autoclick_interval": 0.05,
+    "autoclick_cps": 20.0,
+    "double_click": True,
+    "fg_only": True,
+    "offset_x": 0,
+    "offset_y": 0,
     "return_delay": 0.1,
     "settle": 0.06,
     "max_clicks": 3,
@@ -275,6 +307,12 @@ def load_settings():
                 data = loaded
         except Exception:
             data = {}
+
+    if "autoclick_cps" not in data and data.get("autoclick_interval"):
+        try:
+            data["autoclick_cps"] = round(1.0 / float(data["autoclick_interval"]), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
 
     out = dict(DEFAULTS)
     for key, default in DEFAULTS.items():
@@ -343,6 +381,7 @@ class GoldenCatcherApp:
             self.current_lang = "en"
 
         self._hotkey_handle = None
+        self._ac_hotkey_handle = None
         self._capture_hook = None
         self.tray_icon = None
         self.template_img = None
@@ -350,9 +389,12 @@ class GoldenCatcherApp:
         self._suppress = None
         self._tries = 0
         self._last_w = 0
+        self.ac_active = bool(self.settings["autoclick_enabled"])
+        self.sound_path = _make_chime(CHIME_FILE)
 
         self.build_ui()
         self.apply_hotkey()
+        self.apply_ac_hotkey()
         self.setup_tray()
         self.load_template()
         self.log(self.tr("ready"))
@@ -371,13 +413,18 @@ class GoldenCatcherApp:
                 "version": self._ver_key(),
                 "react": self._react_key(),
                 "hotkey": self.ent_hotkey.get().strip().lower(),
+                "ac_hotkey": self.ent_achotkey.get().strip().lower(),
                 "match_threshold": float(self.ent_thresh.get()),
                 "click_cooldown": float(self.ent_clickcd.get()),
                 "beep_cooldown": float(self.ent_beepcd.get()),
                 "beep_enabled": bool(self.var_beep.get()),
                 "scan_interval": float(self.ent_scanint.get()),
                 "autoclick_enabled": bool(self.var_autoclick.get()),
-                "autoclick_interval": float(self.ent_acinterval.get()),
+                "autoclick_cps": float(self.ent_cps.get()),
+                "double_click": bool(self.var_dbl.get()),
+                "fg_only": bool(self.var_fg.get()),
+                "offset_x": int(self.ent_offx.get() or 0),
+                "offset_y": int(self.ent_offy.get() or 0),
                 "return_delay": float(self.ent_retdelay.get()),
                 "settle": float(self.ent_settle.get()),
                 "max_clicks": int(self.ent_maxclicks.get() or 3),
@@ -403,7 +450,7 @@ class GoldenCatcherApp:
     def _react_key(self):
         return "instant" if self.seg_react.get() == self.tr("react_instant") else "full"
 
-    # ---------- template ----------
+    # ---------- sprite ----------
 
     def _fallback_template(self):
         path = os.path.join(BASE_DIR, "default_template.png")
@@ -413,25 +460,15 @@ class GoldenCatcherApp:
             cv2.circle(img, (32, 32), 26, (0, 160, 215), 2)
             for cx, cy, r in ((22, 22, 5), (44, 26, 4), (26, 45, 5), (43, 44, 3)):
                 cv2.circle(img, (cx, cy), r, (35, 55, 140), -1)
-            _imwrite_unicode(path, img)
+            cv2.imwrite(path, img)
         return path
 
     def load_template(self):
-        for path in _template_candidates():
-            if not os.path.exists(path):
-                continue
-            img = _imread_unicode(path)
-            if img is not None and img.size > 0:
-                self.template_img = img
-                self.log(f"{self.tr('tpl_loaded')} {os.path.basename(path)}")
-                return
-            self.log(f"{self.tr('tpl_bad')} {path}")
-
-        fallback = self._fallback_template()
-        img = _imread_unicode(fallback) if fallback else None
+        path = _bundled_template() or self._fallback_template()
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
         if img is not None and img.size > 0:
             self.template_img = img
-            self.log(f"{self.tr('tpl_loaded')} {os.path.basename(fallback)}")
+            self.log(f"{self.tr('tpl_loaded')} {os.path.basename(path)}")
         else:
             self.template_img = None
             self.log(self.tr("no_template"))
@@ -473,11 +510,7 @@ class GoldenCatcherApp:
         self.running = False
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=2)
-        if self._hotkey_handle is not None:
-            try:
-                keyboard.remove_hotkey(self._hotkey_handle)
-            except Exception:
-                pass
+        self._detach_hotkeys()
         if self._capture_hook is not None:
             try:
                 keyboard.unhook(self._capture_hook)
@@ -545,7 +578,7 @@ class GoldenCatcherApp:
         s = self.settings
         geo = self.root.geometry()
         if geo.startswith("1x1"):
-            geo = "640x720"
+            geo = "640x760"
         for widget in self.root.winfo_children():
             widget.destroy()
 
@@ -671,8 +704,8 @@ class GoldenCatcherApp:
                                        corner_radius=8, justify="center")
         self.ent_hotkey.insert(0, s["hotkey"])
         self.ent_hotkey.pack(side="left")
-        ctk.CTkButton(row, text=self.tr("record"), command=self.capture_hotkey, width=100,
-                      fg_color=C_CARD_HI, hover_color="#2d3138",
+        ctk.CTkButton(row, text=self.tr("record"), command=lambda: self.capture_hotkey("main"),
+                      width=100, fg_color=C_CARD_HI, hover_color="#2d3138",
                       corner_radius=8).pack(side="left", padx=8)
         ctk.CTkButton(row, text=self.tr("apply"), command=self.apply_hotkey, width=100,
                       fg_color=C_ACCENT, hover_color="#d9a121", text_color="#1a1a1a",
@@ -699,31 +732,73 @@ class GoldenCatcherApp:
         s = self.settings
 
         ac_card = self._card(tab, self.tr("auto_frame"))
-        self.var_autoclick = ctk.BooleanVar(value=s["autoclick_enabled"])
+        self.var_autoclick = ctk.BooleanVar(value=self.ac_active)
         ctk.CTkCheckBox(ac_card, text=self.tr("auto_en"), variable=self.var_autoclick,
+                        command=self._on_ac_toggle, font=("Segoe UI", 12),
+                        text_color=C_TEXT, fg_color=C_ACCENT, hover_color=C_ACCENT,
+                        checkmark_color="#1a1a1a").pack(anchor="w", padx=14, pady=(0, 6))
+        self._hint(ac_card, self.tr("ac_hint"))
+
+        self.var_fg = ctk.BooleanVar(value=s["fg_only"])
+        ctk.CTkCheckBox(ac_card, text=self.tr("fg_only"), variable=self.var_fg,
                         font=("Segoe UI", 12), text_color=C_TEXT,
                         fg_color=C_ACCENT, hover_color=C_ACCENT,
                         checkmark_color="#1a1a1a").pack(anchor="w", padx=14, pady=(0, 8))
 
+        hk = ctk.CTkFrame(ac_card, fg_color="transparent")
+        hk.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(hk, text=self.tr("ac_hotkey"), font=("Segoe UI", 12),
+                     text_color=C_TEXT).pack(side="left")
+        self.ent_achotkey = ctk.CTkEntry(hk, width=80, fg_color=C_CARD_HI, border_width=0,
+                                         corner_radius=8, justify="center")
+        self.ent_achotkey.insert(0, s["ac_hotkey"])
+        self.ent_achotkey.pack(side="left", padx=8)
+        ctk.CTkButton(hk, text=self.tr("record"), command=lambda: self.capture_hotkey("ac"),
+                      width=90, fg_color=C_CARD_HI, hover_color="#2d3138",
+                      corner_radius=8).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(hk, text=self.tr("apply"), command=self.apply_ac_hotkey, width=90,
+                      fg_color=C_ACCENT, hover_color="#d9a121", text_color="#1a1a1a",
+                      corner_radius=8).pack(side="left")
+
         pt = ctk.CTkFrame(ac_card, fg_color="transparent")
-        pt.pack(fill="x", padx=14, pady=(0, 12))
+        pt.pack(fill="x", padx=14, pady=(0, 10))
         ctk.CTkLabel(pt, text="X", font=("Segoe UI", 12),
                      text_color=C_MUTED).pack(side="left")
         self.ent_acx = ctk.CTkEntry(pt, width=64, fg_color=C_CARD_HI, border_width=0,
                                     corner_radius=8, justify="center")
         self.ent_acx.insert(0, str(s["ac_x"]))
-        self.ent_acx.pack(side="left", padx=(6, 14))
+        self.ent_acx.pack(side="left", padx=(6, 12))
         ctk.CTkLabel(pt, text="Y", font=("Segoe UI", 12),
                      text_color=C_MUTED).pack(side="left")
         self.ent_acy = ctk.CTkEntry(pt, width=64, fg_color=C_CARD_HI, border_width=0,
                                     corner_radius=8, justify="center")
         self.ent_acy.insert(0, str(s["ac_y"]))
-        self.ent_acy.pack(side="left", padx=(6, 14))
+        self.ent_acy.pack(side="left", padx=(6, 12))
         ctk.CTkButton(pt, text=self.tr("grab_pt"), command=self.grab_point, width=120,
                       fg_color=C_CARD_HI, hover_color="#2d3138",
                       corner_radius=8).pack(side="left")
 
-        self.ent_acinterval = self._num(ac_card, self.tr("interval"), s["autoclick_interval"])
+        off = ctk.CTkFrame(ac_card, fg_color="transparent")
+        off.pack(fill="x", padx=14, pady=(0, 10))
+        ctk.CTkLabel(off, text=self.tr("offset"), font=("Segoe UI", 12),
+                     text_color=C_TEXT).pack(side="left")
+        self.ent_offx = ctk.CTkEntry(off, width=56, fg_color=C_CARD_HI, border_width=0,
+                                     corner_radius=8, justify="center")
+        self.ent_offx.insert(0, str(s["offset_x"]))
+        self.ent_offx.pack(side="left", padx=(8, 6))
+        self.ent_offy = ctk.CTkEntry(off, width=56, fg_color=C_CARD_HI, border_width=0,
+                                     corner_radius=8, justify="center")
+        self.ent_offy.insert(0, str(s["offset_y"]))
+        self.ent_offy.pack(side="left")
+
+        self.ent_cps = self._num(ac_card, self.tr("cps"), s["autoclick_cps"])
+        self.var_dbl = ctk.BooleanVar(value=s["double_click"])
+        dbl_row = ctk.CTkFrame(ac_card, fg_color="transparent")
+        dbl_row.pack(fill="x", padx=14, pady=5)
+        ctk.CTkCheckBox(dbl_row, text=self.tr("dbl"), variable=self.var_dbl,
+                        font=("Segoe UI", 12), text_color=C_TEXT,
+                        fg_color=C_ACCENT, hover_color=C_ACCENT,
+                        checkmark_color="#1a1a1a").pack(side="left")
         self.ent_retdelay = self._num(ac_card, self.tr("ret_delay"), s["return_delay"])
         self.ent_settle = self._num(ac_card, self.tr("settle"), s["settle"])
         self.ent_maxclicks = self._num(ac_card, self.tr("max_clicks"), s["max_clicks"])
@@ -789,6 +864,9 @@ class GoldenCatcherApp:
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
         self.set_status()
+
+    def _on_ac_toggle(self):
+        self.ac_active = bool(self.var_autoclick.get())
 
     # ---------- helpers ----------
 
@@ -972,7 +1050,18 @@ class GoldenCatcherApp:
 
     # ---------- hotkey ----------
 
-    def capture_hotkey(self):
+    def _detach_hotkeys(self):
+        for attr in ("_hotkey_handle", "_ac_hotkey_handle"):
+            handle = getattr(self, attr)
+            if handle is not None:
+                try:
+                    keyboard.remove_hotkey(handle)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def capture_hotkey(self, target="main"):
+        self._detach_hotkeys()
         if self._capture_hook is not None:
             try:
                 keyboard.unhook(self._capture_hook)
@@ -989,18 +1078,26 @@ class GoldenCatcherApp:
             except Exception:
                 pass
             self._capture_hook = None
-            self.root.after(0, self._set_hotkey_field, event.name)
+            self.root.after(0, self._set_hotkey_field, event.name, target)
 
         self._capture_hook = keyboard.hook(on_key, suppress=False)
 
-    def _set_hotkey_field(self, name):
-        self.ent_hotkey.delete(0, "end")
-        self.ent_hotkey.insert(0, name)
+    def _set_hotkey_field(self, name, target):
+        widget = self.ent_achotkey if target == "ac" else self.ent_hotkey
+        widget.delete(0, "end")
+        widget.insert(0, name)
         self.log(f"{self.tr('key_set')} {name}")
+        if target == "ac":
+            self.apply_ac_hotkey()
+        else:
+            self.apply_hotkey()
 
     def apply_hotkey(self):
         name = self.ent_hotkey.get().strip().lower()
         if not name:
+            return
+        if name == self.ent_achotkey.get().strip().lower():
+            messagebox.showerror(self.tr("err"), f"{name}: {self.tr('busy_key')}")
             return
         if self._hotkey_handle is not None:
             try:
@@ -1012,7 +1109,33 @@ class GoldenCatcherApp:
             self._hotkey_handle = keyboard.add_hotkey(name, lambda: self.root.after(0, self.toggle))
             self.settings["hotkey"] = name
         except Exception as e:
-            self.log(f"Hotkey error: {e}")
+            messagebox.showerror(self.tr("err"), f"{name}\n{e}")
+
+    def apply_ac_hotkey(self):
+        name = self.ent_achotkey.get().strip().lower()
+        if not name:
+            return
+        if name == self.ent_hotkey.get().strip().lower():
+            messagebox.showerror(self.tr("err"), f"{name}: {self.tr('busy_key')}")
+            return
+        if self._ac_hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self._ac_hotkey_handle)
+            except Exception:
+                pass
+            self._ac_hotkey_handle = None
+        try:
+            self._ac_hotkey_handle = keyboard.add_hotkey(
+                name, lambda: self.root.after(0, self.toggle_autoclick))
+            self.settings["ac_hotkey"] = name
+        except Exception as e:
+            messagebox.showerror(self.tr("err"), f"{name}\n{e}")
+
+    def toggle_autoclick(self):
+        new = not self.ac_active
+        self.ac_active = new
+        self.var_autoclick.set(new)
+        self.log(self.tr("ac_on") if new else self.tr("ac_off"))
 
     def toggle(self):
         if self.running:
@@ -1028,14 +1151,17 @@ class GoldenCatcherApp:
             "click_cd": max(0.0, float(self.ent_clickcd.get())),
             "beep_cd": max(0.0, float(self.ent_beepcd.get())),
             "interval": max(0.02, float(self.ent_scanint.get())),
-            "ac_interval": max(0.01, float(self.ent_acinterval.get())),
+            "cps": min(60.0, max(1.0, float(self.ent_cps.get() or 20))),
+            "double": bool(self.var_dbl.get()),
+            "fg_only": bool(self.var_fg.get()),
             "return_delay": max(0.0, float(self.ent_retdelay.get())),
             "settle": max(0.0, float(self.ent_settle.get())),
             "max_clicks": max(1, int(self.ent_maxclicks.get() or 3)),
             "beep_on": bool(self.var_beep.get()),
-            "autoclick_on": bool(self.var_autoclick.get()),
             "ac_x": int(self.ent_acx.get() or 0),
             "ac_y": int(self.ent_acy.get() or 0),
+            "off_x": int(self.ent_offx.get() or 0),
+            "off_y": int(self.ent_offy.get() or 0),
             "ignore": self.read_ignore(),
             "react": self._react_key(),
         }
@@ -1068,10 +1194,6 @@ class GoldenCatcherApp:
         if self.cfg["ac_x"] <= 0 or self.cfg["ac_y"] <= 0:
             self.log(self.tr("no_point"))
 
-        try:
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-        except Exception:
-            pass
         if self.tray_icon:
             try:
                 self.tray_icon.notify(self.tr("started"), APP_NAME)
@@ -1101,7 +1223,13 @@ class GoldenCatcherApp:
 
     def _beep(self):
         try:
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            if self.sound_path and os.path.exists(self.sound_path):
+                winsound.PlaySound(
+                    self.sound_path,
+                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            else:
+                winsound.PlaySound("SystemAsterisk",
+                                   winsound.SND_ALIAS | winsound.SND_ASYNC)
         except Exception:
             pass
 
@@ -1114,15 +1242,21 @@ class GoldenCatcherApp:
             return False
         return abs(match[0] - sx) < radius and abs(match[1] - sy) < radius
 
+    def _press(self, x, y, dbl, move=True):
+        if move:
+            pyautogui.moveTo(x, y)
+        pyautogui.click()
+        if dbl:
+            time.sleep(0.02)
+            pyautogui.click()
+
     def _click_golden(self, win, target):
         sx = int(win.left + target[0])
         sy = int(win.top + target[1])
         try:
             pyautogui.moveTo(sx, sy)
             time.sleep(self.cfg["settle"])
-            pyautogui.click()
-            time.sleep(0.02)
-            pyautogui.click()
+            self._press(sx, sy, self.cfg["double"], move=False)
         except Exception:
             pass
         return sx, sy
@@ -1136,10 +1270,7 @@ class GoldenCatcherApp:
         last_beep = 0.0
         last_ac = 0.0
         last_pos = (-9999, -9999)
-
-        back = None
-        if cfg["ac_x"] > 0 and cfg["ac_y"] > 0:
-            back = (cfg["ac_x"], cfg["ac_y"])
+        ac_delay = 1.0 / cfg["cps"]
 
         while self.running:
             if win is None or not win.valid:
@@ -1161,11 +1292,19 @@ class GoldenCatcherApp:
                 continue
 
             now = time.time()
+            focused = True
+            if cfg["fg_only"]:
+                try:
+                    focused = win32gui.GetForegroundWindow() == win.hwnd
+                except Exception:
+                    focused = True
+
             matches = self.find_matches(frame, template, cfg["threshold"], ignore)
             fresh = [m for m in matches if not self._suppressed(m, now)]
             clicked = False
+            sleep_for = cfg["interval"]
 
-            if fresh and now - last_click > cfg["click_cd"]:
+            if fresh and focused and now - last_click > cfg["click_cd"]:
                 target = fresh[0]
 
                 if cfg["react"] == "full" and target[2] > self._last_w + 1:
@@ -1196,22 +1335,22 @@ class GoldenCatcherApp:
             else:
                 self._last_w = 0
 
-            if back is not None:
+            if self.ac_active and focused and cfg["ac_x"] > 0 and cfg["ac_y"] > 0:
+                px = cfg["ac_x"] + cfg["off_x"]
+                py = cfg["ac_y"] + cfg["off_y"]
                 if clicked:
                     time.sleep(cfg["return_delay"])
                 try:
-                    pyautogui.moveTo(back[0], back[1])
+                    if not clicked and now - last_ac >= ac_delay:
+                        self._press(px, py, cfg["double"])
+                        last_ac = now
+                    else:
+                        pyautogui.moveTo(px, py)
                 except Exception:
                     pass
+                sleep_for = min(sleep_for, max(0.005, ac_delay - (time.time() - last_ac)))
 
-                if not clicked and cfg["autoclick_on"] and now - last_ac > cfg["ac_interval"]:
-                    try:
-                        pyautogui.click(back[0], back[1])
-                    except Exception:
-                        pass
-                    last_ac = now
-
-            time.sleep(cfg["interval"])
+            time.sleep(sleep_for)
 
 
 def _single_instance():
@@ -1222,9 +1361,15 @@ def _single_instance():
 def _run():
     handle, first = _single_instance()
     if not first:
+        lang = "ru"
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                lang = json.load(f).get("language", "ru")
+        except Exception:
+            pass
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo(APP_NAME, LANG["ru"]["only_one"])
+        messagebox.showinfo(APP_NAME, LANG.get(lang, LANG["ru"])["only_one"])
         root.destroy()
         return
 

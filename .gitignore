@@ -1,24 +1,14 @@
-# PyInstaller
+__pycache__/
+*.pyc
 build/
 dist/
-*.spec
-
-# Python
-__pycache__/
-*.py[cod]
+*.spec.bak
+settings.json
+custom_template.png
+default_template.png
+crash.log
+chime.wav
+assets/golden_cookie.png
+icon.ico
 .venv/
 venv/
-
-# Настройки и сгенерированные файлы
-settings.json
-default_template.png
-custom_template.png
-auto_template.png
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
